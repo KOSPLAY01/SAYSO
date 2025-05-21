@@ -11,6 +11,9 @@ import cors from "cors";
 import multer from "multer";
 import { v2 as cloudinaryV2 } from "cloudinary";
 import { CloudinaryStorage } from "multer-storage-cloudinary";
+import { createServer } from 'http';
+import { Server } from 'socket.io';
+
 
 dotenv.config();
 
@@ -50,6 +53,17 @@ app.use(cors({
   origin: process.env.FRONTEND_URL,
   credentials: true
 }));
+
+// Socket.io setup
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
+  cors: {
+    origin:process.env.FRONTEND_URL , // or your frontend URL
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    credentials: true
+  }
+});
+
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.json());
 
@@ -130,6 +144,28 @@ passport.use(new GoogleStrategy({
     return done(err);
   }
 }));
+
+// track online users
+const onlineUsers = new Map();
+
+io.on('connection', (socket) => {
+  console.log('User connected:', socket.id);
+
+  socket.on('register', (userId) => {
+    onlineUsers.set(userId, socket.id);
+  });
+
+  socket.on('disconnect', () => {
+    for (let [userId, socketId] of onlineUsers.entries()) {
+      if (socketId === socket.id) {
+        onlineUsers.delete(userId);
+        break;
+      }
+    }
+    console.log('User disconnected:', socket.id);
+  });
+});
+
 
 // Middleware to check authentication
 const isAuth = (req, res, next) => {
@@ -364,7 +400,7 @@ app.post("/api/posts/:id/like", isAuth, async (req, res) => {
   // Check if post exists
   const { data: post, error: postError } = await supabase
     .from("blog_posts")
-    .select("id, like_count")
+    .select("id, user_id, like_count") // include owner ID
     .eq("id", post_id)
     .single();
 
@@ -379,7 +415,7 @@ app.post("/api/posts/:id/like", isAuth, async (req, res) => {
     .single();
 
   if (existingLike) {
-    // Unlike: remove the like
+    // Unlike
     const { error } = await supabase
       .from("likes")
       .delete()
@@ -388,20 +424,32 @@ app.post("/api/posts/:id/like", isAuth, async (req, res) => {
 
     if (error) return res.status(500).json({ message: "Failed to unlike post", error });
 
-    // Decrement like_count safely
     await supabase.rpc("decrement_like_count", { p_id: post_id });
 
     return res.json({ liked: false });
   } else {
-    // Like: add new like record
+    // Like
     const { error } = await supabase
       .from("likes")
       .insert([{ post_id, user_id }]);
 
     if (error) return res.status(500).json({ message: "Failed to like post", error });
 
-    // Increment like_count safely
     await supabase.rpc("increment_like_count", { p_id: post_id });
+
+    // Notify post owner if not the liker
+    if (post.user_id !== user_id) {
+      const receiverSocketId = onlineUsers.get(post.user_id);
+      const senderUsername = req.user.username;
+
+      if (receiverSocketId) {
+        io.to(receiverSocketId).emit("notification", {
+          message: `${senderUsername} liked your post`,
+          type: "like",
+          postId: post_id
+        });
+      }
+    }
 
     return res.json({ liked: true });
   }
@@ -417,7 +465,7 @@ app.post("/api/posts/:id/comments", isAuth, async (req, res) => {
 
   const { data: post } = await supabase
     .from("blog_posts")
-    .select("id")
+    .select("id, user_id") // include post owner
     .eq("id", post_id)
     .single();
 
@@ -431,8 +479,21 @@ app.post("/api/posts/:id/comments", isAuth, async (req, res) => {
 
   if (error) return res.status(500).json({ message: "Failed to add comment", error });
 
-  // Increment comment_count safely
   await supabase.rpc("increment_comment_count", { p_id: post_id });
+
+  // Notify post owner if not the commenter
+  if (post.user_id !== user_id) {
+    const receiverSocketId = onlineUsers.get(post.user_id);
+    const senderUsername = req.user.username;
+
+    if (receiverSocketId) {
+      io.to(receiverSocketId).emit("notification", {
+        message: `${senderUsername} commented on your post`,
+        type: "comment",
+        postId: post_id
+      });
+    }
+  }
 
   res.json(comment);
 });
