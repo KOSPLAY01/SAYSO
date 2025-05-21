@@ -251,7 +251,7 @@ app.post("/api/posts", isAuth, uploadPostImage.single("image"), async (req, res)
 
   const { data, error } = await supabase
     .from("blog_posts")
-    .insert([{ title, content, user_id, category, tags: tagsArray, image_url: imageUrl }])
+    .insert([{ title, content, user_id, category, tags: tagsArray, image_url: imageUrl, like_count: 0, comment_count: 0 }])
     .select()
     .single();
 
@@ -331,118 +331,183 @@ app.put("/api/posts/:id", isAuth, uploadPostImage.single("image"), async (req, r
   res.json(data);
 });
 
-// Delete a post (only by creator)
+// Delete a post (only by creator) and all related comments and likes
 app.delete("/api/posts/:id", isAuth, async (req, res) => {
   const { id } = req.params;
 
-  const { data: existingPost, error: fetchError } = await supabase
+  const { data: post, error: postError } = await supabase
     .from("blog_posts")
     .select("*")
     .eq("id", id)
     .single();
 
-  if (fetchError || !existingPost) return res.status(404).json({ message: "Post not found" });
-  if (existingPost.user_id !== req.user.id) return res.status(403).json({ message: "Forbidden" });
+  if (postError || !post) return res.status(404).json({ message: "Post not found" });
+  if (post.user_id !== req.user.id) return res.status(403).json({ message: "Forbidden" });
 
-  const { error } = await supabase.from("blog_posts").delete().eq("id", id);
+  // Delete likes related to this post
+  await supabase.from("likes").delete().eq("post_id", id);
+  // Delete comments related to this post
+  await supabase.from("comments").delete().eq("post_id", id);
+  // Delete post
+  const { error: delError } = await supabase.from("blog_posts").delete().eq("id", id);
 
-  if (error) return res.status(500).json({ message: "Delete failed", error });
+  if (delError) return res.status(500).json({ message: "Delete failed", error: delError });
+
   res.json({ message: "Post deleted" });
 });
 
-// Add comment to a post (authenticated)
-app.post("/api/posts/:postId/comments", isAuth, async (req, res) => {
-  const { postId } = req.params;
-  const { content } = req.body;
+// Like or Unlike a post (toggle)
+app.post("/api/posts/:id/like", isAuth, async (req, res) => {
+  const post_id = req.params.id;
   const user_id = req.user.id;
 
-  if (!content) return res.status(400).json({ message: "Content is required" });
-
-  // Check post exists
+  // Check if post exists
   const { data: post, error: postError } = await supabase
     .from("blog_posts")
-    .select("id")
-    .eq("id", postId)
+    .select("id, like_count")
+    .eq("id", post_id)
     .single();
 
   if (postError || !post) return res.status(404).json({ message: "Post not found" });
 
-  const { data, error } = await supabase
+  // Check if user already liked this post
+  const { data: existingLike } = await supabase
+    .from("likes")
+    .select("*")
+    .eq("post_id", post_id)
+    .eq("user_id", user_id)
+    .single();
+
+  if (existingLike) {
+    // Unlike: remove the like
+    const { error } = await supabase
+      .from("likes")
+      .delete()
+      .eq("post_id", post_id)
+      .eq("user_id", user_id);
+
+    if (error) return res.status(500).json({ message: "Failed to unlike post", error });
+
+    // Decrement like_count safely
+    await supabase.rpc("decrement_like_count", { p_id: post_id });
+
+    return res.json({ liked: false });
+  } else {
+    // Like: add new like record
+    const { error } = await supabase
+      .from("likes")
+      .insert([{ post_id, user_id }]);
+
+    if (error) return res.status(500).json({ message: "Failed to like post", error });
+
+    // Increment like_count safely
+    await supabase.rpc("increment_like_count", { p_id: post_id });
+
+    return res.json({ liked: true });
+  }
+});
+
+// Add comment to a post
+app.post("/api/posts/:id/comments", isAuth, async (req, res) => {
+  const post_id = req.params.id;
+  const user_id = req.user.id;
+  const { content } = req.body;
+
+  if (!content) return res.status(400).json({ message: "Content is required" });
+
+  const { data: post } = await supabase
+    .from("blog_posts")
+    .select("id")
+    .eq("id", post_id)
+    .single();
+
+  if (!post) return res.status(404).json({ message: "Post not found" });
+
+  const { data: comment, error } = await supabase
     .from("comments")
-    .insert([{ content, post_id: postId, user_id }])
+    .insert([{ post_id, user_id, content }])
     .select()
     .single();
 
   if (error) return res.status(500).json({ message: "Failed to add comment", error });
-  res.json(data);
+
+  // Increment comment_count safely
+  await supabase.rpc("increment_comment_count", { p_id: post_id });
+
+  res.json(comment);
 });
 
-// Get comments for a post (public)
-app.get("/api/posts/:postId/comments", async (req, res) => {
-  const { postId } = req.params;
-
-  const { data, error } = await supabase
-    .from("comments")
-    .select("*, users!inner(username, image_url)")
-    .eq("post_id", postId)
-    .order("created_at", { ascending: true });
-
-  if (error) return res.status(500).json({ message: "Failed to fetch comments", error });
-  res.json(data);
-});
-
-// Edit comment (only by creator)
-app.put("/api/comments/:commentId", isAuth, async (req, res) => {
-  const { commentId } = req.params;
-  const { content } = req.body;
+// Edit comment (only comment owner)
+app.put("/api/comments/:id", isAuth, async (req, res) => {
+  const comment_id = req.params.id;
   const user_id = req.user.id;
+  const { content } = req.body;
 
   if (!content) return res.status(400).json({ message: "Content is required" });
 
-  const { data: existingComment, error: fetchError } = await supabase
+  const { data: comment, error: fetchError } = await supabase
     .from("comments")
     .select("*")
-    .eq("id", commentId)
+    .eq("id", comment_id)
     .single();
 
-  if (fetchError || !existingComment) return res.status(404).json({ message: "Comment not found" });
-  if (existingComment.user_id !== user_id) return res.status(403).json({ message: "Forbidden" });
+  if (fetchError || !comment) return res.status(404).json({ message: "Comment not found" });
+  if (comment.user_id !== user_id) return res.status(403).json({ message: "Forbidden" });
 
   const { data, error } = await supabase
     .from("comments")
     .update({ content })
-    .eq("id", commentId)
+    .eq("id", comment_id)
     .select()
     .single();
 
   if (error) return res.status(500).json({ message: "Failed to update comment", error });
+
   res.json(data);
 });
 
-// Delete comment (only by creator)
-app.delete("/api/comments/:commentId", isAuth, async (req, res) => {
-  const { commentId } = req.params;
+// Delete comment (only comment owner)
+app.delete("/api/comments/:id", isAuth, async (req, res) => {
+  const comment_id = req.params.id;
   const user_id = req.user.id;
 
-  const { data: existingComment, error: fetchError } = await supabase
+  const { data: comment, error: fetchError } = await supabase
     .from("comments")
     .select("*")
-    .eq("id", commentId)
+    .eq("id", comment_id)
     .single();
 
-  if (fetchError || !existingComment) return res.status(404).json({ message: "Comment not found" });
-  if (existingComment.user_id !== user_id) return res.status(403).json({ message: "Forbidden" });
+  if (fetchError || !comment) return res.status(404).json({ message: "Comment not found" });
+  if (comment.user_id !== user_id) return res.status(403).json({ message: "Forbidden" });
 
   const { error } = await supabase
     .from("comments")
     .delete()
-    .eq("id", commentId);
+    .eq("id", comment_id);
 
   if (error) return res.status(500).json({ message: "Failed to delete comment", error });
+
+  // Decrement comment_count safely
+  await supabase.rpc("decrement_comment_count", { p_id: comment.post_id });
+
   res.json({ message: "Comment deleted" });
 });
 
+// Get all comments for a post
+app.get("/api/posts/:id/comments", async (req, res) => {
+  const post_id = req.params.id;
+
+  const { data, error } = await supabase
+    .from("comments")
+    .select("*, users!inner(username, image_url)")
+    .eq("post_id", post_id)
+    .order("created_at", { ascending: true });
+
+  if (error) return res.status(500).json({ message: "Failed to get comments", error });
+
+  res.json(data);
+});
 
 app.listen(port, () => {
-console.log(`Server listening on port ${port}`);
+  console.log(`Server running on port ${port}`);
 });
