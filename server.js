@@ -250,11 +250,40 @@ app.post("/api/login", (req, res, next) => {
   })(req, res, next);
 });
 
-// User Profile
-app.get("/api/profile", (req, res) => {
+app.get("/api/profile", async (req, res) => {
   if (!req.isAuthenticated()) return res.status(401).json({ message: "Unauthorized" });
-  res.json(req.user);
+
+  try {
+    const user = req.user;
+
+    // Fetch user's posts
+    const { data: posts, error: postsError } = await supabase
+      .from("posts")
+      .select("*, comments(*), likes(count)")
+      .eq("user_id", user.id); // or "author_id", depending on your schema
+
+    if (postsError) {
+      console.error("Error fetching user posts:", postsError.message);
+      return res.status(500).json({ message: "Failed to fetch user posts" });
+    }
+
+    // Format posts with comment count and like count
+    const formattedPosts = posts.map(post => ({
+      ...post,
+      comment_count: post.comments?.length || 0,
+      like_count: post.likes?.[0]?.count || 0,
+    }));
+
+    res.json({
+      user,
+      posts: formattedPosts,
+    });
+  } catch (err) {
+    console.error("Server error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
 });
+
 
 // Logout
 app.post("/api/logout", (req, res) => {
