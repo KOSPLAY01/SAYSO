@@ -50,7 +50,7 @@ const uploadImage = async (file) => {
 };
 
 app.get('/', (req, res) => {
-  res.send('Welcome to the SAYSO');
+  res.send('Welcome to SAYSO');
 });
 
 // Auth
