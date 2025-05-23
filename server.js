@@ -49,6 +49,10 @@ const uploadImage = async (file) => {
   return result.secure_url;
 };
 
+app.get('/', (req, res) => {
+  res.send('Welcome to the SAYSO');
+});
+
 // Auth
 app.post('/register', upload.single('image'), async (req, res) => {
   try {
