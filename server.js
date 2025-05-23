@@ -8,11 +8,12 @@ import bcrypt from 'bcrypt';
 import { v2 as cloudinary } from 'cloudinary';
 import dotenv from 'dotenv';
 import fs from 'fs';
+import path from 'path';
 
 dotenv.config();
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: process.env.FRONTEND_URL, credentials: true }));
 app.use(express.json());
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
@@ -23,7 +24,7 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({ dest: '/tmp' });
 
 const generateToken = (user) =>
   jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '7d' });
@@ -41,7 +42,6 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Helper to upload image to Cloudinary and remove local file
 const uploadImage = async (file) => {
   if (!file) return null;
   const result = await cloudinary.uploader.upload(file.path);
@@ -49,12 +49,11 @@ const uploadImage = async (file) => {
   return result.secure_url;
 };
 
-// REGISTER with image upload
+// Auth
 app.post('/register', upload.single('image'), async (req, res) => {
   try {
     const { username, email, password } = req.body;
     const hashedPassword = await bcrypt.hash(password, 10);
-
     const profile_image_url = await uploadImage(req.file);
 
     const { data, error } = await supabase
@@ -72,7 +71,6 @@ app.post('/register', upload.single('image'), async (req, res) => {
   }
 });
 
-// LOGIN
 app.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -90,12 +88,10 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// UPDATE USER PROFILE with optional image
 app.put('/users/me', authenticateToken, upload.single('image'), async (req, res) => {
   try {
     const { username, email } = req.body;
     const profile_image_url = await uploadImage(req.file);
-
     const updateData = {};
     if (username) updateData.username = username;
     if (email) updateData.email = email;
@@ -116,12 +112,11 @@ app.put('/users/me', authenticateToken, upload.single('image'), async (req, res)
   }
 });
 
-// CREATE POST with image
+// Posts
 app.post('/posts', authenticateToken, upload.single('image'), async (req, res) => {
   try {
     const { title, content, category, tags } = req.body;
     const image_url = await uploadImage(req.file);
-
     const tagsArray = tags ? (Array.isArray(tags) ? tags : tags.split(',')) : [];
 
     const { data, error } = await supabase
@@ -138,11 +133,9 @@ app.post('/posts', authenticateToken, upload.single('image'), async (req, res) =
   }
 });
 
-// GET ALL POSTS with filters + comments + likes + counts
 app.get('/posts', async (req, res) => {
   try {
     const { category, tags } = req.query;
-
     let query = supabase
       .from('posts')
       .select(`
@@ -154,18 +147,15 @@ app.get('/posts', async (req, res) => {
       .order('created_at', { ascending: false });
 
     if (category) query = query.eq('category', category);
-    if (tags) {
-      const tagsArray = tags.split(',');
-      query = query.contains('tags', tagsArray);
-    }
+    if (tags) query = query.contains('tags', tags.split(','));
 
     const { data: posts, error } = await query;
     if (error) return res.status(500).json({ error: error.message });
 
-    const postsWithCounts = posts.map((post) => ({
+    const postsWithCounts = posts.map(post => ({
       ...post,
-      like_count: post.likes ? post.likes.length : 0,
-      comment_count: post.comments ? post.comments.length : 0,
+      like_count: post.likes?.length || 0,
+      comment_count: post.comments?.length || 0,
     }));
 
     res.json(postsWithCounts);
@@ -174,11 +164,9 @@ app.get('/posts', async (req, res) => {
   }
 });
 
-// GET POST BY ID with user, comments, likes + counts
 app.get('/posts/:id', async (req, res) => {
   try {
     const { id } = req.params;
-
     const { data: post, error } = await supabase
       .from('posts')
       .select(`
@@ -194,8 +182,8 @@ app.get('/posts/:id', async (req, res) => {
 
     const postWithCounts = {
       ...post,
-      like_count: post.likes ? post.likes.length : 0,
-      comment_count: post.comments ? post.comments.length : 0,
+      like_count: post.likes?.length || 0,
+      comment_count: post.comments?.length || 0,
     };
 
     res.json(postWithCounts);
@@ -204,24 +192,15 @@ app.get('/posts/:id', async (req, res) => {
   }
 });
 
-// UPDATE POST (only by creator) with image
 app.put('/posts/:id', authenticateToken, upload.single('image'), async (req, res) => {
   try {
     const { id } = req.params;
     const { title, content, category, tags } = req.body;
-
-    const { data: existingPost, error: fetchError } = await supabase
-      .from('posts')
-      .select('user_id')
-      .eq('id', id)
-      .single();
-
+    const { data: existingPost, error: fetchError } = await supabase.from('posts').select('user_id').eq('id', id).single();
     if (fetchError) return res.status(400).json({ error: fetchError.message });
-
     if (existingPost.user_id !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
 
     const image_url = await uploadImage(req.file);
-
     const updateData = {};
     if (title) updateData.title = title;
     if (content) updateData.content = content;
@@ -229,38 +208,23 @@ app.put('/posts/:id', authenticateToken, upload.single('image'), async (req, res
     if (tags) updateData.tags = Array.isArray(tags) ? tags : tags.split(',');
     if (image_url) updateData.image_url = image_url;
 
-    const { data, error } = await supabase
-      .from('posts')
-      .update(updateData)
-      .eq('id', id)
-      .select()
-      .single();
-
+    const { data, error } = await supabase.from('posts').update(updateData).eq('id', id).select().single();
     if (error) return res.status(400).json({ error: error.message });
-
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// DELETE POST (only by creator) + related comments & likes
 app.delete('/posts/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-
-    const { data: existingPost, error: fetchError } = await supabase
-      .from('posts')
-      .select('user_id')
-      .eq('id', id)
-      .single();
-
+    const { data: existingPost, error: fetchError } = await supabase.from('posts').select('user_id').eq('id', id).single();
     if (fetchError) return res.status(400).json({ error: fetchError.message });
     if (existingPost.user_id !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
 
     await supabase.from('comments').delete().eq('post_id', id);
     await supabase.from('likes').delete().eq('post_id', id);
-
     const { error } = await supabase.from('posts').delete().eq('id', id);
     if (error) return res.status(400).json({ error: error.message });
 
@@ -270,7 +234,7 @@ app.delete('/posts/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// LIKE/UNLIKE TOGGLE
+// Likes
 app.post('/likes', authenticateToken, async (req, res) => {
   try {
     const { post_id } = req.body;
@@ -283,13 +247,8 @@ app.post('/likes', authenticateToken, async (req, res) => {
       .eq('user_id', req.user.id)
       .single();
 
-    if (fetchError && fetchError.code !== 'PGRST116') {
-      return res.status(500).json({ error: fetchError.message });
-    }
-
-    if (existingLike) {
-      const { error } = await supabase.from('likes').delete().eq('id', existingLike.id);
-      if (error) return res.status(400).json({ error: error.message });
+    if (!fetchError && existingLike) {
+      await supabase.from('likes').delete().eq('id', existingLike.id);
       return res.json({ message: 'Unliked' });
     } else {
       const { data, error } = await supabase.from('likes').insert([{ post_id, user_id: req.user.id }]);
@@ -301,24 +260,23 @@ app.post('/likes', authenticateToken, async (req, res) => {
   }
 });
 
-// GET ALL COMMENTS for a post with user info
+// Comments
 app.get('/posts/:postId/comments', async (req, res) => {
   try {
     const { postId } = req.params;
-    const { data: comments, error } = await supabase
+    const { data, error } = await supabase
       .from('comments')
       .select('*, users(username, profile_image_url)')
       .eq('post_id', postId)
       .order('created_at', { ascending: true });
 
     if (error) return res.status(400).json({ error: error.message });
-    res.json(comments);
+    res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ADD COMMENT to post
 app.post('/posts/:postId/comments', authenticateToken, async (req, res) => {
   try {
     const { postId } = req.params;
@@ -338,7 +296,6 @@ app.post('/posts/:postId/comments', authenticateToken, async (req, res) => {
   }
 });
 
-// EDIT COMMENT (only by owner)
 app.put('/comments/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -362,11 +319,9 @@ app.put('/comments/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// DELETE COMMENT (only by owner)
 app.delete('/comments/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-
     const { data: existingComment, error: fetchError } = await supabase
       .from('comments')
       .select('user_id')
@@ -385,5 +340,7 @@ app.delete('/comments/:id', authenticateToken, async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(process.env.PORT || 3000, () => {
+  console.log(`Server running on port ${process.env.PORT || 3000}`);
+});
+export default app;
