@@ -70,7 +70,11 @@ app.use(express.json());
 app.use(session({
   secret: process.env.SESSION_SECRET,
   resave: false,
-  saveUninitialized: true
+  saveUninitialized: true,
+   cookie: {
+    sameSite: "none",  // ✅ allow cross-origin cookies
+    secure: true       // ✅ required for 'SameSite: none' to work (must be HTTPS)
+  }
 }));
 
 app.use(passport.initialize());
