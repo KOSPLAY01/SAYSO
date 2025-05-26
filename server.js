@@ -14,6 +14,13 @@ dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
+
+const allowedOrigins = [
+  process.env.FRONTEND_URL,
+  'http://localhost:5173',
+  'http://127.0.0.1:3000',
+];
+
 const io = new SocketIOServer(server, {
   cors: {
     origin: (origin, callback) => {
@@ -27,6 +34,7 @@ const io = new SocketIOServer(server, {
     credentials: true,
   },
 });
+
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 
 cloudinary.config({
@@ -37,15 +45,8 @@ cloudinary.config({
 
 const upload = multer({ dest: '/tmp' });
 
-const allowedOrigins = [
-  process.env.FRONTEND_URL,       // Deployed frontend
-  'http://localhost:5173',        // Local frontend
-  'http://127.0.0.1:3000'         // Alternate local frontend
-];
-
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (e.g., Postman or mobile apps)
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
@@ -79,6 +80,12 @@ const emitNotification = async (receiverId, message) => {
   if (socketId) {
     io.to(socketId).emit('notification', message);
   }
+};
+
+const calculateReadTime = (content) => {
+  if (!content) return "1 min";
+  const words = content.trim().split(/\s+/).length;
+  return `${Math.ceil(words / 300)} min`;
 };
 
 const generateToken = (user) =>
@@ -146,7 +153,7 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// Update user profile
+// Update user
 app.put('/users/me', authenticateToken, upload.single('image'), async (req, res) => {
   try {
     const { username, email, bio } = req.body;
@@ -186,7 +193,7 @@ app.get('/users/:id/profile', async (req, res) => {
 
     const { data: posts, error: postsError } = await supabase
       .from('posts')
-      .select('id, title, content, category, tags, image_url, created_at')
+      .select('id, title, content, category, tags, image_url, created_at, read_time')
       .eq('user_id', id)
       .order('created_at', { ascending: false });
 
@@ -203,10 +210,11 @@ app.post('/posts', authenticateToken, upload.single('image'), async (req, res) =
   try {
     const { title, content, category, tags } = req.body;
     const image_url = await uploadImage(req.file);
+    const read_time = calculateReadTime(content);
 
     const { data, error } = await supabase
       .from('posts')
-      .insert([{ title, content, category, tags, image_url, user_id: req.user.id }])
+      .insert([{ title, content, category, tags, image_url, user_id: req.user.id, read_time }])
       .select()
       .single();
 
@@ -222,10 +230,10 @@ app.get('/posts', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('posts')
-      .select('*, users(username, profile_image_url)')
+      .select('*, users(id, username, profile_image_url)')
       .order('created_at', { ascending: false });
 
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) return res.status(400).json({ error: error.message });
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -239,11 +247,11 @@ app.get('/posts/:id', async (req, res) => {
 
     const { data: post, error } = await supabase
       .from('posts')
-      .select('*, users(username, profile_image_url)')
+      .select('*, users(id, username, profile_image_url)')
       .eq('id', id)
       .single();
 
-    if (error) return res.status(404).json({ error: 'Post not found' });
+    if (error || !post) return res.status(404).json({ error: 'Post not found' });
     res.json(post);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -256,18 +264,20 @@ app.put('/posts/:id', authenticateToken, upload.single('image'), async (req, res
     const { id } = req.params;
     const { title, content, category, tags } = req.body;
     const image_url = await uploadImage(req.file);
-    const updateData = {};
-    if (title) updateData.title = title;
-    if (content) updateData.content = content;
-    if (category) updateData.category = category;
-    if (tags) updateData.tags = tags;
+    const read_time = calculateReadTime(content);
+
+    const { data: post } = await supabase.from('posts').select('*').eq('id', id).single();
+    if (!post || post.user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Not authorized to update this post' });
+    }
+
+    const updateData = { title, content, category, tags, read_time };
     if (image_url) updateData.image_url = image_url;
 
     const { data, error } = await supabase
       .from('posts')
       .update(updateData)
       .eq('id', id)
-      .eq('user_id', req.user.id)
       .select()
       .single();
 
@@ -282,8 +292,15 @@ app.put('/posts/:id', authenticateToken, upload.single('image'), async (req, res
 app.delete('/posts/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const { error } = await supabase.from('posts').delete().eq('id', id).eq('user_id', req.user.id);
+
+    const { data: post } = await supabase.from('posts').select('*').eq('id', id).single();
+    if (!post || post.user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Not authorized to delete this post' });
+    }
+
+    const { error } = await supabase.from('posts').delete().eq('id', id);
     if (error) return res.status(400).json({ error: error.message });
+
     res.json({ message: 'Post deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -293,24 +310,22 @@ app.delete('/posts/:id', authenticateToken, async (req, res) => {
 // Comment on post
 app.post('/posts/:id/comments', authenticateToken, async (req, res) => {
   try {
-    const { id } = req.params;
+    const { id: post_id } = req.params;
     const { content } = req.body;
+
+    const { data: post } = await supabase.from('posts').select('*').eq('id', post_id).single();
+    if (!post) return res.status(404).json({ error: 'Post not found' });
 
     const { data: comment, error } = await supabase
       .from('comments')
-      .insert([{ content, post_id: id, user_id: req.user.id }])
+      .insert([{ post_id, user_id: req.user.id, content }])
       .select()
       .single();
 
     if (error) return res.status(400).json({ error: error.message });
 
-    await supabase.rpc('update_comment_count', { post_id_input: id });
-
-    const { data: post } = await supabase.from('posts').select('user_id').eq('id', id).single();
-    const { data: user } = await supabase.from('users').select('username').eq('id', req.user.id).single();
-
-    if (post?.user_id !== req.user.id) {
-      emitNotification(post.user_id, `${user.username} commented on your post`);
+    if (post.user_id !== req.user.id) {
+      emitNotification(post.user_id, `Your post was commented on: "${content}"`);
     }
 
     res.json(comment);
@@ -318,61 +333,137 @@ app.post('/posts/:id/comments', authenticateToken, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-// Like or dislike a post
-app.post('/posts/:id/react', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { reaction } = req.body;
-
-    const existing = await supabase
-      .from('likes')
-      .select('*')
-      .eq('post_id', id)
-      .eq('user_id', req.user.id)
-      .single();
-
-    if (existing.data) {
-      await supabase.from('likes').delete().eq('id', existing.data.id);
-    }
-
-    if (reaction === 'like' || reaction === 'dislike') {
-      await supabase
-        .from('likes')
-        .insert([{ post_id: id, user_id: req.user.id, reaction }]);
-    }
-
-    await supabase.rpc('update_like_count', { post_id_input: id });
-
-    const { data: post } = await supabase.from('posts').select('user_id').eq('id', id).single();
-    const { data: user } = await supabase.from('users').select('username').eq('id', req.user.id).single();
-
-    if (reaction === 'like' && post?.user_id !== req.user.id) {
-      emitNotification(post.user_id, `${user.username} liked your post`);
-    }
-
-    res.json({ message: 'Reaction updated' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Get comments
+// Get comments for post
 app.get('/posts/:id/comments', async (req, res) => {
   try {
     const { id } = req.params;
+
     const { data, error } = await supabase
       .from('comments')
-      .select('*, users(username, profile_image_url)')
+      .select('*, users(id, username, profile_image_url)')
       .eq('post_id', id)
-      .order('created_at', { ascending: true });
+      .order('created_at', { ascending: false });
 
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) return res.status(400).json({ error: error.message });
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Edit comment
+app.put('/comments/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { content } = req.body;
+
+    const { data: comment, error: fetchError } = await supabase
+      .from('comments')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (fetchError || !comment) return res.status(404).json({ error: 'Comment not found' });
+    if (comment.user_id !== req.user.id) return res.status(403).json({ error: 'Not authorized to edit this comment' });
+
+    const { data, error } = await supabase
+      .from('comments')
+      .update({ content })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete comment
+app.delete('/comments/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: comment, error: fetchError } = await supabase
+      .from('comments')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (fetchError || !comment) return res.status(404).json({ error: 'Comment not found' });
+    if (comment.user_id !== req.user.id) return res.status(403).json({ error: 'Not authorized to delete this comment' });
+
+    const { error } = await supabase
+      .from('comments')
+      .delete()
+      .eq('id', id);
+
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ message: 'Comment deleted' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// Like/Unlike toggle endpoint
+app.post('/posts/:id/like', authenticateToken, async (req, res) => {
+  try {
+    const { id: post_id } = req.params;
+
+    const { data: post, error: postError } = await supabase
+      .from('posts')
+      .select('*')
+      .eq('id', post_id)
+      .single();
+
+    if (postError || !post) {
+      return res.status(404).json({ error: 'Post not found' });
+    }
+
+    const { data: existingLike, error: likeError } = await supabase
+      .from('likes')
+      .select('*')
+      .eq('post_id', post_id)
+      .eq('user_id', req.user.id)
+      .single();
+
+    if (likeError && likeError.code !== 'PGRST116') {
+      return res.status(400).json({ error: likeError.message });
+    }
+
+    if (!existingLike) {
+      // Add a like
+      const { data: newLike, error: insertError } = await supabase
+        .from('likes')
+        .insert([{ post_id, user_id: req.user.id }])
+        .select()
+        .single();
+
+      if (insertError) return res.status(400).json({ error: insertError.message });
+
+      if (post.user_id !== req.user.id) {
+        emitNotification(post.user_id, `Your post was liked.`);
+      }
+
+      return res.status(201).json(newLike);
+    } else {
+      // Remove the like (unlike)
+      const { error: deleteError } = await supabase
+        .from('likes')
+        .delete()
+        .eq('id', existingLike.id);
+
+      if (deleteError) return res.status(400).json({ error: deleteError.message });
+
+      return res.json({ message: 'Like removed' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
