@@ -407,64 +407,6 @@ app.delete('/comments/:id', authenticateToken, async (req, res) => {
 });
 
 
-// Like/Unlike toggle endpoint
-app.post('/posts/:id/like', authenticateToken, async (req, res) => {
-  try {
-    const { id: post_id } = req.params;
-
-    const { data: post, error: postError } = await supabase
-      .from('posts')
-      .select('*')
-      .eq('id', post_id)
-      .single();
-
-    if (postError || !post) {
-      return res.status(404).json({ error: 'Post not found' });
-    }
-
-    const { data: existingLike, error: likeError } = await supabase
-      .from('likes')
-      .select('*')
-      .eq('post_id', post_id)
-      .eq('user_id', req.user.id)
-      .single();
-
-    if (likeError && likeError.code !== 'PGRST116') {
-      return res.status(400).json({ error: likeError.message });
-    }
-
-    if (!existingLike) {
-      // Add a like
-      const { data: newLike, error: insertError } = await supabase
-        .from('likes')
-        .insert([{ post_id, user_id: req.user.id }])
-        .select()
-        .single();
-
-      if (insertError) return res.status(400).json({ error: insertError.message });
-
-      if (post.user_id !== req.user.id) {
-        emitNotification(post.user_id, `Your post was liked.`);
-      }
-
-      return res.status(201).json(newLike);
-    } else {
-      // Remove the like (unlike)
-      const { error: deleteError } = await supabase
-        .from('likes')
-        .delete()
-        .eq('id', existingLike.id);
-
-      if (deleteError) return res.status(400).json({ error: deleteError.message });
-
-      return res.json({ message: 'Like removed' });
-    }
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
