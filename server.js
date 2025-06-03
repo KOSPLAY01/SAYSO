@@ -224,23 +224,45 @@ app.post('/posts', authenticateToken, upload.single('image'), async (req, res) =
     res.status(500).json({ error: err.message });
   }
 });
-
 // Get all posts
 app.get('/posts', async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data: posts, error } = await supabase
       .from('posts')
       .select('*, users(id, username, profile_image_url)')
       .order('created_at', { ascending: false });
 
     if (error) return res.status(400).json({ error: error.message });
-    res.json(data);
+
+    // Fetch likes for all post IDs in one query for efficiency
+    const postIds = posts.map(post => post.id);
+    const { data: likes, error: likesError } = await supabase
+      .from('likes')
+      .select('post_id, user_id')
+      .in('post_id', postIds);
+
+    if (likesError) return res.status(400).json({ error: likesError.message });
+
+    // Map post_id to list of user_ids who liked
+    const likesByPost = {};
+    likes.forEach(like => {
+      if (!likesByPost[like.post_id]) likesByPost[like.post_id] = [];
+      likesByPost[like.post_id].push(like.user_id);
+    });
+
+    // Attach the user IDs who liked each post
+    const postsWithLikes = posts.map(post => ({
+      ...post,
+      liked_user_ids: likesByPost[post.id] || []
+    }));
+
+    res.json(postsWithLikes);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Get single post
+// Get post by ID
 app.get('/posts/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -252,11 +274,24 @@ app.get('/posts/:id', async (req, res) => {
       .single();
 
     if (error || !post) return res.status(404).json({ error: 'Post not found' });
-    res.json(post);
+
+    // Get all user_ids who liked this post
+    const { data: likes, error: likesError } = await supabase
+      .from('likes')
+      .select('user_id')
+      .eq('post_id', id);
+
+    if (likesError) return res.status(400).json({ error: likesError.message });
+
+    res.json({ 
+      ...post, 
+      liked_user_ids: likes.map(like => like.user_id) 
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 // Update post
 app.put('/posts/:id', authenticateToken, upload.single('image'), async (req, res) => {
