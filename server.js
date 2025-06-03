@@ -193,7 +193,7 @@ app.get('/users/:id/profile', async (req, res) => {
 
     const { data: posts, error: postsError } = await supabase
       .from('posts')
-      .select('id, title, content, category, tags, image_url, created_at, read_time')
+      .select('id, title, content, category, tags, image_url, created_at, read_time, likes_count, comments_count')
       .eq('user_id', id)
       .order('created_at', { ascending: false });
 
