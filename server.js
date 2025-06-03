@@ -406,6 +406,44 @@ app.delete('/comments/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// Like or unlike post
+app.post('/posts/:id/like', authenticateToken, async (req, res) => {
+  try {
+    const { id: post_id } = req.params;
+
+    const { data: existingLike, error: likeError } = await supabase
+      .from('likes')
+      .select('*')
+      .eq('post_id', post_id)
+      .eq('user_id', req.user.id)
+      .single();
+
+    if (!existingLike) {
+      // Like the post
+      const { data, error } = await supabase
+        .from('likes')
+        .insert([{ post_id, user_id: req.user.id, action: 'like' }]);
+
+      if (error) return res.status(400).json({ error: error.message });
+
+      res.json({ message: 'Post liked' });
+    } else {
+      // Unlike the post
+      const { error } = await supabase
+        .from('likes')
+        .delete()
+        .eq('id', existingLike.id);
+
+      if (error) return res.status(400).json({ error: error.message });
+
+      res.json({ message: 'Post unliked' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
