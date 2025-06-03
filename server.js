@@ -406,11 +406,11 @@ app.delete('/comments/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Like or unlike post
 app.post('/posts/:id/like', authenticateToken, async (req, res) => {
   try {
     const { id: post_id } = req.params;
 
+    // Check if the user already liked the post
     const { data: existingLike, error: likeError } = await supabase
       .from('likes')
       .select('*')
@@ -426,7 +426,6 @@ app.post('/posts/:id/like', authenticateToken, async (req, res) => {
 
       if (error) return res.status(400).json({ error: error.message });
 
-      res.json({ message: 'Post liked' });
     } else {
       // Unlike the post
       const { error } = await supabase
@@ -435,13 +434,22 @@ app.post('/posts/:id/like', authenticateToken, async (req, res) => {
         .eq('id', existingLike.id);
 
       if (error) return res.status(400).json({ error: error.message });
-
-      res.json({ message: 'Post unliked' });
     }
+
+    // Get updated like count
+    const { count, error: countError } = await supabase
+      .from('likes')
+      .select('id', { count: 'exact', head: true })
+      .eq('post_id', post_id);
+
+    if (countError) return res.status(400).json({ error: countError.message });
+
+    res.json({ message: existingLike ? 'Post unliked' : 'Post liked', likeCount: count });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 
 
